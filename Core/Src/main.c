@@ -146,13 +146,7 @@ HAL_StatusTypeDef motor_CAN_RxTxSettings_init(FDCAN_TxHeaderTypeDef *Htxheader)
   return HAL_OK;
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  if (htim->Instance == TIM6) 
-  {
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-  }
-}
+
 
 // void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs){
 // 	if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET) {
@@ -319,7 +313,7 @@ printf("fdcan_getrxmessage is error\r\n");
 Error_Handler();
 }
 
-if (RxHeader_com.Identifier == 0x010)
+if (RxHeader_com.Identifier == 0x206)
 {
 uint8_t motor0_up = RxData[0];
 uint8_t motor0_down = RxData[1];
@@ -395,13 +389,13 @@ int main(void)
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim6);
-  if (HAL_OK != motor_CAN_RxTxSettings_init(&TXHeader_motor)) Error_Handler();
+  if (HAL_OK != motor_CAN_RxTxSettings_init(&TxHeader)) Error_Handler();
 while(1){
   // uint8_t txdata[8] = {0};
   // int16_t cu = -3980;
   // txdata[0] = (uint8_t)(cu >> 8);
   // txdata[1] = (uint8_t)(cu & 0xFF);
-  // CAN_SEND(0x200,txdata, &hfdcan3, &TXHeader_motor);
+  // CAN_SEND(0x200,txdata, &hfdcan3, &TxHeader);
   // HAL_Delay(100);
 }
   /* USER CODE END 2 */
