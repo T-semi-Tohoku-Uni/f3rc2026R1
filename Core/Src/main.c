@@ -388,15 +388,30 @@ int main(void)
   MX_FDCAN3_Init();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
+ int16_t _v=0;
+  motors[0].Kp = 10; motors[0].Ki = 0; motors[0].Kd = 0; motors[0].gosagoukei=0; motors[0].maenogosa=0; motors[0].v=0; motors[0].can_id=0x201; motors[0].mokuhyou=_v;
+  motors[1].Kp = 10; motors[1].Ki = 0; motors[1].Kd = 0; motors[1].gosagoukei=0; motors[1].maenogosa=0; motors[1].v=0; motors[1].can_id=0x202; motors[1].mokuhyou=_v;
+ 
+    FDCAN_FilterTypeDef  FDCAN_Filter_settings;
+  FDCAN_Filter_settings.IdType=FDCAN_STANDARD_ID;
+  FDCAN_Filter_settings.FilterIndex=0;
+  FDCAN_Filter_settings.FilterType=FDCAN_FILTER_RANGE;
+  FDCAN_Filter_settings.FilterConfig=FDCAN_FILTER_TO_RXFIFO0;
+  FDCAN_Filter_settings.FilterID1=0x200;
+  FDCAN_Filter_settings.FilterID2=0x410;
+  TxHeader.IdType=FDCAN_STANDARD_ID;
+  TxHeader.TxFrameType=FDCAN_DATA_FRAME;
+  TxHeader.DataLength=FDCAN_DLC_BYTES_8;
+  TxHeader.ErrorStateIndicator=FDCAN_ESI_ACTIVE;
+  TxHeader.BitRateSwitch=FDCAN_BRS_OFF;
+  TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
+  TxHeader.TxEventFifoControl=FDCAN_NO_TX_EVENTS;
+  TxHeader.MessageMarker=0;
+  
   HAL_TIM_Base_Start_IT(&htim6);
   if (HAL_OK != motor_CAN_RxTxSettings_init(&TxHeader)) Error_Handler();
 while(1){
-  // uint8_t txdata[8] = {0};
-  // int16_t cu = -3980;
-  // txdata[0] = (uint8_t)(cu >> 8);
-  // txdata[1] = (uint8_t)(cu & 0xFF);
-  // CAN_SEND(0x200,txdata, &hfdcan3, &TxHeader);
-  // HAL_Delay(100);
+  
 }
   /* USER CODE END 2 */
 
