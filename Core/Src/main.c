@@ -28,17 +28,54 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 typedef struct {
+    /* 速度PID用：モーター0、1 */
     volatile float gosagoukei;
-    volatile float maenogosa;   
-    float Kp, Ki, Kd;    
+    volatile float maenogosa;
+    float Kp, Ki, Kd;
     volatile int16_t v;
-    uint16_t can_id; 
+    uint16_t can_id;
     volatile int16_t mokuhyou;
+
+    /* 位置制御用：主にモーター2 */
+    volatile uint16_t encoder_raw;
+    volatile uint16_t previous_encoder_raw;
+    volatile int32_t position_count;
+    volatile int32_t target_position_count;
+
+    volatile float position_integral;
+    volatile float previous_position_error;
+
+    float position_Kp;
+    float position_Ki;
+    float position_Kd;
+
+    volatile uint8_t encoder_initialized;
+    volatile uint8_t homed;
 } Motor;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define M2006_ENCODER_CPR          8192L
+
+/* 72 × 36 = 2592度 = 7.2回転 */
+#define MOTOR2_MOVE_DEGREE         (72.0f * 36.0f)
+
+#define MOTOR2_MOVE_COUNT \
+    ((int32_t)(M2006_ENCODER_CPR * MOTOR2_MOVE_DEGREE / 360.0f))
+
+/* 8192 × 7.2 = 58982.4カウント */
+#define MOTOR2_MAX_CURRENT         3000
+
+/*
+ * CubeMXで設定したフォトインタラプタの名前に合わせて変更する。
+ *
+ * 例：
+ * #define MOTOR2_PHOTO_GPIO_Port GPIOC
+ * #define MOTOR2_PHOTO_Pin       GPIO_PIN_2
+ */
+#define MOTOR2_PHOTO_GPIO_Port     GPIOC
+#define MOTOR2_PHOTO_Pin           GPIO_PIN_2
 
 /* USER CODE END PD */
 
@@ -51,7 +88,11 @@ typedef struct {
 FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan3;
 
+
 TIM_HandleTypeDef htim6;
+#include <math.h> // 数学
+#include <stdlib.h> // 絶対値
+#define PI 3.14159265359
 
 /* USER CODE BEGIN PV */
 
@@ -63,7 +104,23 @@ FDCAN_RxHeaderTypeDef RxHeader;
 FDCAN_TxHeaderTypeDef TxHeader_com;
 FDCAN_RxHeaderTypeDef RxHeader_com;
 
-volatile uint8_t sekiyu_state = 0; // 0:上移動待機 1:上移動 2:下移動待機 3:下移動
+/*
+ * 操作側マイコンから受信したボタン状態
+ *
+ * RxData[0]：モーター0 上昇
+ * RxData[1]：モーター0 下降
+ * RxData[2]：モーター1 上昇
+ * RxData[3]：モーター1 下降
+ */
+volatile uint8_t motor0_up = 0;
+volatile uint8_t motor0_down = 0;
+volatile uint8_t motor1_up = 0;
+volatile uint8_t motor1_down = 0;
+
+volatile uint8_t motor2_command_previous = 0;
+
+/* フォトインタラプタの前回状態 */
+volatile GPIO_PinState motor2_photo_previous = GPIO_PIN_SET;
 
 /* USER CODE END PV */
 
@@ -143,7 +200,61 @@ HAL_StatusTypeDef motor_CAN_RxTxSettings_init(FDCAN_TxHeaderTypeDef *Htxheader)
   return HAL_OK;
 }
 
+HAL_StatusTypeDef communication_CAN_init(void)
+{
+    FDCAN_FilterTypeDef filter = {0};
 
+    /*
+     * 標準ID 0x205だけを受信し、
+     * Rx FIFO1に格納する
+     */
+    filter.IdType = FDCAN_STANDARD_ID;
+    filter.FilterIndex = 0;
+    filter.FilterType = FDCAN_FILTER_MASK;
+    filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO1;
+    filter.FilterID1 = 0x205;
+    filter.FilterID2 = 0x7FF;
+
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    /*
+     * 0x205以外の標準IDおよび拡張IDを拒否する
+     */
+    if (HAL_FDCAN_ConfigGlobalFilter(
+            &hfdcan1,
+            FDCAN_REJECT,
+            FDCAN_REJECT,
+            FDCAN_FILTER_REMOTE,
+            FDCAN_FILTER_REMOTE) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    /*
+     * FIFO1にメッセージが入ったとき
+     * 受信割り込みを発生させる
+     */
+    if (HAL_FDCAN_ActivateNotification(
+            &hfdcan1,
+            FDCAN_IT_RX_FIFO1_NEW_MESSAGE,
+            0U) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    /*
+     * FDCAN1の通信を開始する
+     */
+    if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    return HAL_OK;
+}
 
 // void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs){
 // 	if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET) {
@@ -170,40 +281,110 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 if(htim == &htim6)
 {
-/* ------------ モーター0 ------------ */
+/* =========================================================
+ * モーター0、1の目標速度決定
+ *
+ * GPIO_PULLUPを使用しているため、
+ * リミットスイッチ押下時はGPIO_PIN_RESETとして判定する
+ * ========================================================= */
 
-if(HAL_GPIO_ReadPin(GPIOC, motor0_upper_Pin))
+/* ---------- モーター0のリミット状態 ---------- */
+
+uint8_t motor0_upper_limit =
+    (HAL_GPIO_ReadPin(
+        GPIOC,
+        motor0_upper_Pin) == GPIO_PIN_RESET);
+
+uint8_t motor0_lower_limit =
+    (HAL_GPIO_ReadPin(
+        GPIOC,
+        motor0_lower_Pin) == GPIO_PIN_RESET);
+
+
+/* ---------- モーター1のリミット状態 ---------- */
+
+uint8_t motor1_upper_limit =
+    (HAL_GPIO_ReadPin(
+        GPIOC,
+        motor1_upper_Pin) == GPIO_PIN_RESET);
+
+uint8_t motor1_lower_limit =
+    (HAL_GPIO_ReadPin(
+        GPIOC,
+        motor1_lower_Pin) == GPIO_PIN_RESET);
+
+
+/* =========================================================
+ * モーター0の目標速度決定
+ * ========================================================= */
+
+/*
+ * 上昇と下降が同時に押されたときは停止する
+ */
+if (motor0_up && motor0_down)
 {
-if(motors[0].mokuhyou < 0)
-{
-motors[0].mokuhyou = 0;
+    motors[0].mokuhyou = 0;
+    motors[0].gosagoukei = 0.0f;
 }
+/*
+ * 下ボタンが押され、下限に達していなければ下降
+ */
+else if (motor0_down && !motor0_lower_limit)
+{
+    motors[0].mokuhyou = 4000;
+}
+/*
+ * 上ボタンが押され、上限に達していなければ上昇
+ */
+else if (motor0_up && !motor0_upper_limit)
+{
+    motors[0].mokuhyou = -4000;
+}
+/*
+ * ボタンを押していない場合、
+ * またはリミットに達している場合は停止
+ */
+else
+{
+    motors[0].mokuhyou = 0;
+    motors[0].gosagoukei = 0.0f;
 }
 
-if(HAL_GPIO_ReadPin(GPIOC, motor0_lower_Pin))
-{
-if(motors[0].mokuhyou > 0)
-{
-motors[0].mokuhyou = 0;
-}
-}
 
-/* ------------ モーター1 ------------ */
+/* =========================================================
+ * モーター1の目標速度決定
+ * ========================================================= */
 
-if(HAL_GPIO_ReadPin(GPIOC, motor1_upper_Pin))
+/*
+ * 上昇と下降が同時に押されたときは停止する
+ */
+if (motor1_up && motor1_down)
 {
-if(motors[1].mokuhyou < 0)
-{
-motors[1].mokuhyou = 0;
+    motors[1].mokuhyou = 0;
+    motors[1].gosagoukei = 0.0f;
 }
-}
-
-if(HAL_GPIO_ReadPin(GPIOC, motor1_lower_Pin))
+/*
+ * 下ボタンが押され、下限に達していなければ下降
+ */
+else if (motor1_down && !motor1_lower_limit)
 {
-if(motors[1].mokuhyou > 0)
-{
-motors[1].mokuhyou = 0;
+    motors[1].mokuhyou = 4000;
 }
+/*
+ * 上ボタンが押され、上限に達していなければ上昇
+ */
+else if (motor1_up && !motor1_upper_limit)
+{
+    motors[1].mokuhyou = -4000;
+}
+/*
+ * ボタンを押していない場合、
+ * またはリミットに達している場合は停止
+ */
+else
+{
+    motors[1].mokuhyou = 0;
+    motors[1].gosagoukei = 0.0f;
 }
 
 /* ------------ PID計算 ------------ */
@@ -294,61 +475,55 @@ motors[i].v =
 }
 
 // マイコン間通信
-void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan,
-uint32_t RxFifo1ITs)
+// FDCAN1：操作側マイコンからの指令受信
+void HAL_FDCAN_RxFifo1Callback(
+    FDCAN_HandleTypeDef *hfdcan,
+    uint32_t RxFifo1ITs)
 {
-if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) != RESET)
-{
-uint8_t RxData[8] = {};
+    /*
+     * FDCAN1以外のコールバックだった場合は処理しない
+     */
+    if (hfdcan != &hfdcan1)
+    {
+        return;
+    }
 
-if (HAL_FDCAN_GetRxMessage(&hfdcan1,
-FDCAN_RX_FIFO1,
-&RxHeader_com,
-RxData) != HAL_OK)
-{
-printf("fdcan_getrxmessage is error\r\n");
-Error_Handler();
-}
+    /*
+     * FIFO1に新しいメッセージが入った場合だけ処理する
+     */
+    if ((RxFifo1ITs &
+         FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == 0U)
+    {
+        return;
+    }
 
-if (RxHeader_com.Identifier == 0x206)
-{
-uint8_t motor0_up = RxData[0];
-uint8_t motor0_down = RxData[1];
+    uint8_t RxData[8] = {0};
 
-uint8_t motor1_up = RxData[2];
-uint8_t motor1_down = RxData[3];
+    /*
+     * FIFO1から受信データを取り出す
+     */
+    if (HAL_FDCAN_GetRxMessage(
+            &hfdcan1,
+            FDCAN_RX_FIFO1,
+            &RxHeader_com,
+            RxData) != HAL_OK)
+    {
+        printf("fdcan_getrxmessage is error\r\n");
+        Error_Handler();
+    }
 
-/* motor0 */
+    /*
+     * 操作側マイコンからのIDが0x205の場合だけ
+     * ボタン状態を保存する
+     */
+    if (RxHeader_com.Identifier == 0x205)
+    {
+        motor0_up = RxData[0];
+        motor0_down = RxData[1];
 
-if (motor0_down)
-{
-motors[0].mokuhyou = 4000; // 下移動
-}
-else if (motor0_up)
-{
-motors[0].mokuhyou = -4000; // 上移動
-}
-else
-{
-motors[0].mokuhyou = 0;
-}
-
-/* motor1 */
-
-if (motor1_down)
-{
-motors[1].mokuhyou = 4000; // 下移動
-}
-else if (motor1_up)
-{
-motors[1].mokuhyou = -4000; // 上移動
-}
-else
-{
-motors[1].mokuhyou = 0;
-}
-}
-}
+        motor1_up = RxData[2];
+        motor1_down = RxData[3];
+    }
 }
 /* USER CODE END 0 */
 
@@ -407,9 +582,12 @@ int main(void)
   
   HAL_TIM_Base_Start_IT(&htim6);
   if (HAL_OK != motor_CAN_RxTxSettings_init(&TxHeader)) Error_Handler();
-while(1){
-  
-}
+
+  if (HAL_OK != communication_CAN_init())
+  {
+    Error_Handler();
+  }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -613,7 +791,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pins : motor0_upper_Pin motor0_lower_Pin motor1_upper_Pin motor1_lower_Pin */
   GPIO_InitStruct.Pin = motor0_upper_Pin|motor0_lower_Pin|motor1_upper_Pin|motor1_lower_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
