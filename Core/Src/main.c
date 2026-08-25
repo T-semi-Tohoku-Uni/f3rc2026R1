@@ -445,6 +445,9 @@ TxData
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
 uint32_t RxFifo0ITs)
 {
+if (hfdcan != &hfdcan3) {
+return;
+}
 if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
 {
 uint8_t RxData[8];
