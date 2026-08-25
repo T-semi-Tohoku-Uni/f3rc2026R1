@@ -88,11 +88,7 @@ typedef struct {
 FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan3;
 
-
 TIM_HandleTypeDef htim6;
-#include <math.h> // 数学
-#include <stdlib.h> // 絶対値
-#define PI 3.14159265359
 
 /* USER CODE BEGIN PV */
 
@@ -788,8 +784,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
-  /*Configure GPIO pins : motor0_upper_Pin motor0_lower_Pin motor1_upper_Pin motor1_lower_Pin */
-  GPIO_InitStruct.Pin = motor0_upper_Pin|motor0_lower_Pin|motor1_upper_Pin|motor1_lower_Pin;
+  /*Configure GPIO pins : motor0_upper_Pin motor0_lower_Pin motor1_upper_Pin motor1_lower_Pin
+                           motor3_upper_Pin motor3_lower_Pin motor2_photointerrupter_Pin */
+  GPIO_InitStruct.Pin = motor0_upper_Pin|motor0_lower_Pin|motor1_upper_Pin|motor1_lower_Pin
+                          |motor3_upper_Pin|motor3_lower_Pin|motor2_photointerrupter_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
