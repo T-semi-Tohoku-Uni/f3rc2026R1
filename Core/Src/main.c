@@ -65,7 +65,7 @@ typedef struct {
     ((int32_t)(M2006_ENCODER_CPR * MOTOR2_MOVE_DEGREE / 360.0f))
 
 /* 8192 × 7.2 = 58982.4カウント */
-#define MOTOR2_MAX_CURRENT         3000
+#define MOTOR2_MAX_CURRENT         1000
 
 /*
  * CubeMXで設定したフォトインタラプタの名前に合わせて変更する。
@@ -74,8 +74,8 @@ typedef struct {
  * #define MOTOR2_PHOTO_GPIO_Port GPIOC
  * #define MOTOR2_PHOTO_Pin       GPIO_PIN_2
  */
-#define MOTOR2_PHOTO_GPIO_Port     GPIOC
-#define MOTOR2_PHOTO_Pin           GPIO_PIN_2
+#define motor2_photointerrupter_GPIO_Port     GPIOC
+#define motor2_photointerrupter_Pin           GPIO_PIN_2
 
 /* USER CODE END PD */
 
@@ -89,6 +89,9 @@ FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan3;
 
 TIM_HandleTypeDef htim6;
+#include <math.h> // 数学
+#include <stdlib.h> // 絶対値
+#define PI 3.14159265359
 
 /* USER CODE BEGIN PV */
 
@@ -103,16 +106,20 @@ FDCAN_RxHeaderTypeDef RxHeader_com;
 /*
  * 操作側マイコンから受信したボタン状態
  *
- * RxData[0]：モーター0 上昇
- * RxData[1]：モーター0 下降
- * RxData[2]：モーター1 上昇
- * RxData[3]：モーター1 下降
+ * RxData[2]：モーター0 上昇
+ * RxData[3]：モーター0 下降
+ * RxData[4]：モーター1 上昇
+ * RxData[5]：モーター1 下降
  */
 volatile uint8_t motor0_up = 0;
 volatile uint8_t motor0_down = 0;
 volatile uint8_t motor1_up = 0;
 volatile uint8_t motor1_down = 0;
 
+/*
+ * モーター2, RxData[1]から受信する
+ */
+volatile uint8_t motor2_command = 0;
 volatile uint8_t motor2_command_previous = 0;
 
 /* フォトインタラプタの前回状態 */
@@ -162,7 +169,7 @@ void motor_CAN_txheader_init(FDCAN_TxHeaderTypeDef *Htxheader)
   Htxheader->DataLength = FDCAN_DLC_BYTES_8;
   Htxheader->ErrorStateIndicator = FDCAN_ESI_ACTIVE;
   Htxheader->FDFormat = FDCAN_CLASSIC_CAN;
-  Htxheader->BitRateSwitch = FDCAN_BRS_ON;
+  Htxheader->BitRateSwitch = FDCAN_BRS_OFF;
   Htxheader->TxEventFifoControl = FDCAN_NO_TX_EVENTS;
   Htxheader->MessageMarker = 0;
 }
@@ -277,13 +284,68 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 if(htim == &htim6)
 {
+/*
+ * モーター2のフォトインタラプタ処理(合ってるかわからん)
+ * GPIO_PULLUPを使用しているため、検出時GPIO_PIN_RESETを想定
+  */
+GPIO_PinState motor2_photo_now =
+    HAL_GPIO_ReadPin(
+        motor2_photointerrupter_GPIO_Port,
+        motor2_photointerrupter_Pin);
+
+/*
+ * SETからRESETへ変わった瞬間だけ処理する
+ */
+if ((motor2_photo_previous == GPIO_PIN_SET) &&
+    (motor2_photo_now == GPIO_PIN_RESET))
+{
+    
+  // 座標系をずらして現在位置を0にする。
+  // 目標位置も同じ量だけずらすことで、フォトインタラプタ検出前後で
+  // 残りの移動量が変わらないようにする。homedってなんだ
+    
+    motors[2].target_position_count -=
+        motors[2].position_count;
+
+    motors[2].position_count = 0;
+
+    motors[2].position_integral = 0.0f;
+    motors[2].previous_position_error = 0.0f;
+
+    motors[2].homed = 1U;
+}
+
+// 次回の判定用に現在状態を保存する
+motor2_photo_previous = motor2_photo_now;
+
 /* =========================================================
- * モーター0、1の目標速度決定
- *
- * GPIO_PULLUPを使用しているため、
- * リミットスイッチ押下時はGPIO_PIN_RESETとして判定する
+ * モーター2の72度回転指令
  * ========================================================= */
 
+//ボタンが0から1へ変わった瞬間を検出する
+if ((motor2_command != 0U) &&
+    (motor2_command_previous == 0U) &&
+    (motors[2].encoder_initialized != 0U))
+  {
+  //現在位置から72度先を目標位置にする
+  
+    motors[2].target_position_count =
+        motors[2].position_count +
+        MOTOR2_MOVE_COUNT;
+
+    /*
+     * 新しい動作を開始するのでPIDをリセット
+     */
+    motors[2].position_integral = 0.0f;
+    motors[2].previous_position_error = 0.0f;
+}
+// 次回の判定用に現在のボタン状態を保存
+motor2_command_previous = motor2_command;
+
+// モーター0、1の目標速度決定
+// GPIO_PULLUPを使用しているため、
+// リミットスイッチ押下時はGPIO_PIN_RESETとして判定する
+ 
 /* ---------- モーター0のリミット状態 ---------- */
 
 uint8_t motor0_upper_limit =
@@ -347,9 +409,9 @@ else
 }
 
 
-/* =========================================================
+/* ===================================================
  * モーター1の目標速度決定
- * ========================================================= */
+ * =================================================== */
 
 /*
  * 上昇と下降が同時に押されたときは停止する
@@ -425,10 +487,95 @@ TxData[2*h] = (uint8_t)(current_cmd >> 8);
 TxData[2*h + 1] = (uint8_t)(current_cmd & 0xFF);
 }
 
-/* 未使用モーターは0 */
+//モーター2の位置PID
+int16_t motor2_current_cmd = 0;
 
-TxData[4] = 0;
-TxData[5] = 0;
+//エンコーダを1回以上受信している場合だけ制御する(?)
+if (motors[2].encoder_initialized != 0U)
+{
+  //位置誤差
+    float motor2_position_error =
+        (float)(
+            motors[2].target_position_count -
+            motors[2].position_count);
+
+  //積分
+    motors[2].position_integral +=
+        motor2_position_error * 0.001f;
+
+  //積分値の上限下限
+
+    if (motors[2].position_integral > 10000.0f)
+    {
+        motors[2].position_integral = 10000.0f;
+    }
+
+    if (motors[2].position_integral < -10000.0f)
+    {
+        motors[2].position_integral = -10000.0f;
+    }
+
+  //微分値
+    float motor2_position_derivative =
+        (motor2_position_error -
+         motors[2].previous_position_error) /
+        0.001f;
+
+  //位置PID出力
+    float motor2_output =
+        motors[2].position_Kp *
+            motor2_position_error +
+        motors[2].position_Ki *
+            motors[2].position_integral +
+        motors[2].position_Kd *
+            motor2_position_derivative;
+
+    motors[2].previous_position_error =
+        motor2_position_error;
+
+  //電流を±MOTOR2_MAX_CURRENTに制限
+    if (motor2_output >
+        (float)MOTOR2_MAX_CURRENT)
+    {
+        motor2_output =
+            (float)MOTOR2_MAX_CURRENT;
+    }
+
+    if (motor2_output <
+        -(float)MOTOR2_MAX_CURRENT)
+    {
+        motor2_output =
+            -(float)MOTOR2_MAX_CURRENT;
+    }
+
+  //目標位置から±50以内なら停止、積分値もリセット
+
+    if ((motor2_position_error < 50.0f) &&
+        (motor2_position_error > -50.0f))
+    {
+      motor2_output = 0.0f;
+      motors[2].position_integral = 0.0f;
+    }
+
+    motor2_current_cmd =
+        (int16_t)motor2_output;
+}
+
+/*
+ * モーター2、CAN ID 0x203の電流指令
+ */
+uint16_t motor2_current_data =
+    (uint16_t)motor2_current_cmd;
+
+TxData[4] =
+    (uint8_t)(motor2_current_data >> 8);
+
+TxData[5] =
+    (uint8_t)(motor2_current_data & 0xFF);
+
+/*
+ * モーター3はまだ未実装なので0
+ */
 TxData[6] = 0;
 TxData[7] = 0;
 
@@ -441,36 +588,128 @@ TxData
 }
     // リミットスイッチ処理↑
     
-    // モーター速度フィードバック受信
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
-uint32_t RxFifo0ITs)
+//FDCAN3：ロボマスモーターのフィードバック受信
+void HAL_FDCAN_RxFifo0Callback(
+  FDCAN_HandleTypeDef *hfdcan,
+  uint32_t RxFifo0ITs)
 {
-if (hfdcan != &hfdcan3) {
-return;
-}
-if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
-{
-uint8_t RxData[8];
+  //FDCAN3以外なら処理しない
+    if (hfdcan != &hfdcan3)
+    {
+        return;
+    }
 
-if (HAL_FDCAN_GetRxMessage(&hfdcan3,
-FDCAN_RX_FIFO0,
-&RxHeader,
-RxData) != HAL_OK)
-{
-printf("fdcan_getrxmessage is error\r\n");
-Error_Handler();
-}
+  //FIFO0に新しいメッセージがない場合は処理しない
+    if ((RxFifo0ITs &
+         FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
+    {
+        return;
+    }
 
-for (int i = 0; i < 2; i++)
-{
-if (RxHeader.Identifier == motors[i].can_id)
-{
-// DJIモーター速度(RPM)
-motors[i].v =
-(int16_t)((RxData[2] << 8) | RxData[3]);
-}
-}
-}
+    uint8_t RxData[8] = {0};
+
+    /*
+     * FIFO0からデータを取得する
+     */
+    if (HAL_FDCAN_GetRxMessage(
+        &hfdcan3,
+        FDCAN_RX_FIFO0,
+        &RxHeader,
+        RxData) != HAL_OK)
+    {
+        printf("fdcan_getrxmessage is error\r\n");
+        Error_Handler();
+    }
+
+    /*
+     * モーター0、1、2を確認する
+     */
+    for (int i = 0; i < 3; i++)
+    {
+        if (RxHeader.Identifier == motors[i].can_id)
+        {
+            /*
+             * Byte 0、1：エンコーダ角度
+             * 範囲は0～8191
+             */
+            uint16_t new_encoder =
+                (uint16_t)(
+                    ((uint16_t)RxData[0] << 8) |
+                    RxData[1]);
+
+            /*
+             * Byte 2、3：現在速度
+             */
+            motors[i].v =
+                (int16_t)(
+                    ((uint16_t)RxData[2] << 8) |
+                    RxData[3]);
+
+            /*
+             * モーター2だけ累積位置を計算する
+             */
+            if (i == 2)
+            {
+                /*
+                 * 初めてエンコーダ値を受信した場合
+                 */
+                if (motors[2].encoder_initialized == 0U)
+                {
+                    motors[2].encoder_raw =
+                        new_encoder;
+
+                    motors[2].previous_encoder_raw =
+                        new_encoder;
+
+                    motors[2].position_count = 0;
+                    motors[2].target_position_count = 0;
+
+                    motors[2].encoder_initialized = 1U;
+                }
+                else
+                {
+                    /*
+                     * 前回値から何カウント動いたか
+                     */
+                    int32_t encoder_difference =
+                        (int32_t)new_encoder -
+                        (int32_t)motors[2]
+                            .previous_encoder_raw;
+
+                    /*
+                     * 8191から0をまたいで
+                     * 正方向へ回転した場合
+                     */
+                    if (encoder_difference < -4096)
+                    {
+                        encoder_difference +=
+                            M2006_ENCODER_CPR;
+                    }
+                    /*
+                     * 0から8191をまたいで
+                     * 負方向へ回転した場合
+                     */
+                    else if (encoder_difference > 4096)
+                    {
+                        encoder_difference -=
+                            M2006_ENCODER_CPR;
+                    }
+
+                    /*
+                     * 累積位置へ加算する
+                     */
+                    motors[2].position_count +=
+                        encoder_difference;
+
+                    motors[2].encoder_raw =
+                        new_encoder;
+
+                    motors[2].previous_encoder_raw =
+                        new_encoder;
+                }
+            }
+        }
+    }
 }
 
 // マイコン間通信
@@ -517,11 +756,13 @@ void HAL_FDCAN_RxFifo1Callback(
      */
     if (RxHeader_com.Identifier == 0x205)
     {
-        motor0_up = RxData[0];
-        motor0_down = RxData[1];
+        motor0_up = RxData[2];
+        motor0_down = RxData[3];
 
-        motor1_up = RxData[2];
-        motor1_down = RxData[3];
+        motor1_up = RxData[4];
+        motor1_down = RxData[5];
+        
+        motor2_command = RxData[1];
     }
 }
 /* USER CODE END 0 */
@@ -559,10 +800,58 @@ int main(void)
   MX_FDCAN3_Init();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
+
  int16_t _v=0;
-  motors[0].Kp = 10; motors[0].Ki = 0; motors[0].Kd = 0; motors[0].gosagoukei=0; motors[0].maenogosa=0; motors[0].v=0; motors[0].can_id=0x201; motors[0].mokuhyou=_v;
-  motors[1].Kp = 10; motors[1].Ki = 0; motors[1].Kd = 0; motors[1].gosagoukei=0; motors[1].maenogosa=0; motors[1].v=0; motors[1].can_id=0x202; motors[1].mokuhyou=_v;
- 
+  //モーター0
+  motors[0].Kp = 10;
+  motors[0].Ki = 0;
+  motors[0].Kd = 0;
+  motors[0].gosagoukei = 0;
+  motors[0].maenogosa = 0;
+  motors[0].v = 0;
+  motors[0].can_id = 0x201;
+  motors[0].mokuhyou = _v;
+  
+  //モーター1
+  motors[1].Kp = 10;
+  motors[1].Ki = 0;
+  motors[1].Kd = 0;
+  motors[1].gosagoukei = 0;
+  motors[1].maenogosa = 0;
+  motors[1].v = 0;
+  motors[1].can_id = 0x202;
+  motors[1].mokuhyou= _v;
+
+  //モーター2
+  motors[2].Kp = 0.0f;
+  motors[2].Ki = 0.0f;
+  motors[2].Kd = 0.0f;
+  motors[2].gosagoukei = 0.0f;
+  motors[2].maenogosa = 0.0f;
+  motors[2].v = 0;
+  motors[2].can_id = 0x203;
+  motors[2].mokuhyou = 0;
+
+  /* エンコーダ情報 */
+  motors[2].encoder_raw = 0;
+  motors[2].previous_encoder_raw = 0;
+  motors[2].encoder_initialized = 0;
+
+/* 現在位置と目標位置 */
+motors[2].position_count = 0;
+motors[2].target_position_count = 0;
+
+/* 位置PID */
+motors[2].position_integral = 0.0f;
+motors[2].previous_position_error = 0.0f;
+
+motors[2].position_Kp = 0.05f;
+motors[2].position_Ki = 0.0f;
+motors[2].position_Kd = 0.0f;
+
+/* フォトインタラプタ検出済みフラグ */
+motors[2].homed = 0;
+
     FDCAN_FilterTypeDef  FDCAN_Filter_settings;
   FDCAN_Filter_settings.IdType=FDCAN_STANDARD_ID;
   FDCAN_Filter_settings.FilterIndex=0;
