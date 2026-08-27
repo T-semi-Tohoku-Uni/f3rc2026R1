@@ -67,16 +67,24 @@ typedef struct {
 /* 8192 × 7.2 = 58982.4カウント */
 #define MOTOR2_MAX_CURRENT         1000
 
-/*
- * CubeMXで設定したフォトインタラプタの名前に合わせて変更する。
- *
- * 例：
- * #define MOTOR2_PHOTO_GPIO_Port GPIOC
- * #define MOTOR2_PHOTO_Pin       GPIO_PIN_2
- */
-#define motor2_photointerrupter_GPIO_Port     GPIOC
-#define motor2_photointerrupter_Pin           GPIO_PIN_2
+/* モーター3の動作状態 */
 
+/* 開く方向へ移動中 */
+#define MOTOR3_STATE_OPENING  0U
+
+/* 開側リミットで停止中 */
+#define MOTOR3_STATE_OPENED   1U
+
+/* 閉じる方向へ電流を流して保持中 */
+#define MOTOR3_STATE_HOLDING  2U
+
+
+//モーター3の電流値。回転方向が逆だったら正負を反対に！！
+
+/* ブロックを挟む方向 */
+#define MOTOR3_HOLD_CURRENT    1000
+/* 板を開く方向 */
+#define MOTOR3_OPEN_CURRENT   (-1000)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -89,9 +97,8 @@ FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan3;
 
 TIM_HandleTypeDef htim6;
-#include <math.h> // 数学
-#include <stdlib.h> // 絶対値
-#define PI 3.14159265359
+
+UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
@@ -125,6 +132,22 @@ volatile uint8_t motor2_command_previous = 0;
 /* フォトインタラプタの前回状態 */
 volatile GPIO_PinState motor2_photo_previous = GPIO_PIN_SET;
 
+/*
+ * モーター3開閉ボタン、0x205のRxData[0]から受信
+ */
+volatile uint8_t motor3_command = 0;
+
+/*
+ * ボタンの前回状態。0から1へ変わった瞬間を検出するために使用
+ */
+volatile uint8_t motor3_command_previous = 0;
+
+/*
+ * モーター3の現在状態。起動直後は開側リミットまで開く。
+ */
+volatile uint8_t motor3_state =
+    MOTOR3_STATE_OPENING;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -133,12 +156,19 @@ static void MX_GPIO_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_FDCAN3_Init(void);
 static void MX_FDCAN1_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int _write(int file, char *ptr, int len)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY);
+  return len;
+}
+
 HAL_StatusTypeDef CAN_SEND(uint32_t CANID, uint8_t *txdata, FDCAN_HandleTypeDef *hfdcan, FDCAN_TxHeaderTypeDef *htxheader)
 {
   htxheader->Identifier = CANID;
@@ -304,15 +334,26 @@ if ((motor2_photo_previous == GPIO_PIN_SET) &&
   // 目標位置も同じ量だけずらすことで、フォトインタラプタ検出前後で
   // 残りの移動量が変わらないようにする。homedってなんだ
     
-    motors[2].target_position_count -=
-        motors[2].position_count;
+/*
+ * 仕切りを検出した位置を原点にする
+ */
+motors[2].position_count = 0;
 
-    motors[2].position_count = 0;
+/*
+ * 目標位置も0にすることで、その場で停止させる
+ */
+motors[2].target_position_count = 0;
 
-    motors[2].position_integral = 0.0f;
-    motors[2].previous_position_error = 0.0f;
+/*
+ * PIDの内部値をリセットする
+ */
+motors[2].position_integral = 0.0f;
+motors[2].previous_position_error = 0.0f;
 
-    motors[2].homed = 1U;
+/*
+ * 一度以上、仕切りを検出した
+ */
+motors[2].homed = 1U;
 }
 
 // 次回の判定用に現在状態を保存する
@@ -325,7 +366,8 @@ motor2_photo_previous = motor2_photo_now;
 //ボタンが0から1へ変わった瞬間を検出する
 if ((motor2_command != 0U) &&
     (motor2_command_previous == 0U) &&
-    (motors[2].encoder_initialized != 0U))
+    (motors[2].encoder_initialized != 0U) &&
+    (motors[2].homed != 0U))
   {
   //現在位置から72度先を目標位置にする
   
@@ -490,7 +532,7 @@ TxData[2*h + 1] = (uint8_t)(current_cmd & 0xFF);
 //モーター2の位置PID
 int16_t motor2_current_cmd = 0;
 
-//エンコーダを1回以上受信している場合だけ制御する(?)
+//エンコーダを1回以上受信している場合だけ制御
 if (motors[2].encoder_initialized != 0U)
 {
   //位置誤差
@@ -573,11 +615,141 @@ TxData[4] =
 TxData[5] =
     (uint8_t)(motor2_current_data & 0xFF);
 
+/* =========================================================
+ * モーター3の電流制御。upperを開側、lowerを閉側リミットとしている。
+ * =========================================================*/
+uint8_t motor3_upper_limit =
+    (HAL_GPIO_ReadPin(
+        GPIOC,
+        motor3_upper_Pin) == GPIO_PIN_RESET);
+
+uint8_t motor3_lower_limit =
+    (HAL_GPIO_ReadPin(
+        GPIOC,
+        motor3_lower_Pin) == GPIO_PIN_RESET);
+
+
+/* ---------------------------------------------------------
+ * ○ボタンの立ち上がりを検出。0から1になった瞬間だけ処理
+ * --------------------------------------------------------- */
+if ((motor3_command != 0U) &&
+    (motor3_command_previous == 0U))
+{
+    /*
+     * 開き切って停止してたら閉じて保持する。
+     */
+    if (motor3_state == MOTOR3_STATE_OPENED)
+    {
+        motor3_state =
+            MOTOR3_STATE_HOLDING;
+    }
+    /*
+     * 閉じてたら開く。
+     */
+    else if (motor3_state == MOTOR3_STATE_HOLDING)
+    {
+        motor3_state =
+            MOTOR3_STATE_OPENING;
+    }
+}
+
+
 /*
- * モーター3はまだ未実装なので0
+ * 次回のタイマー割り込みで使うため、今回のボタン状態を保存。
  */
-TxData[6] = 0;
-TxData[7] = 0;
+motor3_command_previous = motor3_command;
+
+
+/* ---------------------------------------------------------
+ * 現在の状態から、モーター3の電流指令を決める
+ * --------------------------------------------------------- */
+int16_t motor3_current_cmd = 0;
+
+
+/*
+ * 開く方向へ移動中
+ */
+if (motor3_state == MOTOR3_STATE_OPENING)
+{
+    /*
+     * 開側リミットに到達した場合。
+     */
+    if (motor3_upper_limit != 0U)
+    {
+        /*
+         * モーターを停止する。
+         */
+        motor3_current_cmd = 0;
+
+        /*
+         * 開き切った状態へ変更する。
+         */
+        motor3_state =
+            MOTOR3_STATE_OPENED;
+    }
+    else
+    {
+        /*
+         * まだ開側リミットへ到達していないため、
+         * 開く方向へ一定電流を流す。
+         */
+        motor3_current_cmd =
+            MOTOR3_OPEN_CURRENT;
+    }
+}
+
+
+/*
+ * ブロックを挟んで保持する状態
+ */
+else if (motor3_state == MOTOR3_STATE_HOLDING)
+{
+    /*
+     * 閉側リミットへ到達した場合。
+     *
+     * ブロックがないときに機構が閉じすぎることを
+     * 防止するため、電流を0にする。
+     */
+    if (motor3_lower_limit != 0U)
+    {
+        motor3_current_cmd = 0;
+    }
+    else
+    {
+        /*
+         * 閉じる方向へ一定電流を流す。
+         *
+         * ブロックを挟んでモーターの回転が止まっても、
+         * この電流を維持することで挟む力を保つ。
+         */
+        motor3_current_cmd =
+            MOTOR3_HOLD_CURRENT;
+    }
+}
+
+
+/*
+ * 開側リミットで停止している場合
+ */
+else
+{
+    motor3_current_cmd = 0;
+}
+
+
+/* ---------------------------------------------------------
+ * モーター3の電流指令をCANデータへ入れる
+ * CAN ID 0x200のByte 6、7は、
+ * CAN ID 0x204のモーターに対応する。
+ * --------------------------------------------------------- */
+uint16_t motor3_current_data =
+    (uint16_t)motor3_current_cmd;
+
+TxData[6] =
+    (uint8_t)(motor3_current_data >> 8);
+
+TxData[7] =
+    (uint8_t)(motor3_current_data & 0xFF);
 
 HAL_FDCAN_AddMessageToTxFifoQ(
 &hfdcan3,
@@ -603,7 +775,7 @@ void HAL_FDCAN_RxFifo0Callback(
     if ((RxFifo0ITs &
          FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
     {
-        return;
+         return;
     }
 
     uint8_t RxData[8] = {0};
@@ -622,59 +794,71 @@ void HAL_FDCAN_RxFifo0Callback(
     }
 
     /*
-     * モーター0、1、2を確認する
+     * モーター0、1、2、3を確認する
      */
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
     {
         if (RxHeader.Identifier == motors[i].can_id)
         {
-            /*
-             * Byte 0、1：エンコーダ角度
-             * 範囲は0～8191
-             */
-            uint16_t new_encoder =
-                (uint16_t)(
-                    ((uint16_t)RxData[0] << 8) |
-                    RxData[1]);
+        //Byte 0、1：エンコーダ角度 範囲は0～8191
+          uint16_t new_encoder =
+            (uint16_t)(
+               ((uint16_t)RxData[0] << 8) |
+              RxData[1]);
 
-            /*
-             * Byte 2、3：現在速度
-             */
-            motors[i].v =
-                (int16_t)(
-                    ((uint16_t)RxData[2] << 8) |
-                    RxData[3]);
+        //Byte2,3：現在速度
+        motors[i].v =
+            (int16_t)(
+                ((uint16_t)RxData[2] << 8) |
+                RxData[3]);
 
-            /*
-             * モーター2だけ累積位置を計算する
-             */
-            if (i == 2)
+        //モーター2だけ累積位置を計算する
+        if (i == 2)
+        {
+            //初めてエンコーダ値を受信した場合
+            if (motors[2].encoder_initialized == 0U)
             {
+                motors[2].encoder_raw = new_encoder;
+                motors[2].previous_encoder_raw = new_encoder;
                 /*
-                 * 初めてエンコーダ値を受信した場合
+                * 起動時の位置を仮の0として扱う
+                */
+                motors[2].position_count = 0;
+
+                /*
+                 * 起動時点ですでに仕切りを検出しているか確認する
                  */
-                if (motors[2].encoder_initialized == 0U)
-                {
-                    motors[2].encoder_raw =
-                        new_encoder;
-
-                    motors[2].previous_encoder_raw =
-                        new_encoder;
-
-                    motors[2].position_count = 0;
+                if (HAL_GPIO_ReadPin(
+                     motor2_photointerrupter_GPIO_Port,
+                     motor2_photointerrupter_Pin)
+                    == GPIO_PIN_RESET)
+                  {
+                  /*
+                   * すでに仕切り位置にいるため、動かさない
+                   */
                     motors[2].target_position_count = 0;
+                    motors[2].homed = 1U;
+                  }
+                else
+                  {
+                    /*
+                     * 検出できなければ最大72度分自動回転を開始
+                     */
+                    motors[2].target_position_count =
+                    MOTOR2_MOVE_COUNT;
 
-                    motors[2].encoder_initialized = 1U;
+                    motors[2].homed = 0U;
+                  }
+
+                motors[2].encoder_initialized = 1U;
                 }
                 else
                 {
-                    /*
-                     * 前回値から何カウント動いたか
-                     */
-                    int32_t encoder_difference =
-                        (int32_t)new_encoder -
-                        (int32_t)motors[2]
-                            .previous_encoder_raw;
+                /*
+                 * 前回値から何カウント動いたか
+                 */
+                int32_t encoder_difference =
+                    (int32_t)new_encoder - (int32_t)motors[2].previous_encoder_raw;
 
                     /*
                      * 8191から0をまたいで
@@ -682,8 +866,7 @@ void HAL_FDCAN_RxFifo0Callback(
                      */
                     if (encoder_difference < -4096)
                     {
-                        encoder_difference +=
-                            M2006_ENCODER_CPR;
+                    encoder_difference += M2006_ENCODER_CPR;
                     }
                     /*
                      * 0から8191をまたいで
@@ -691,21 +874,20 @@ void HAL_FDCAN_RxFifo0Callback(
                      */
                     else if (encoder_difference > 4096)
                     {
-                        encoder_difference -=
-                            M2006_ENCODER_CPR;
+                    encoder_difference -= M2006_ENCODER_CPR;
                     }
 
                     /*
                      * 累積位置へ加算する
                      */
                     motors[2].position_count +=
-                        encoder_difference;
+                    encoder_difference;
 
                     motors[2].encoder_raw =
-                        new_encoder;
+                    new_encoder;
 
                     motors[2].previous_encoder_raw =
-                        new_encoder;
+                    new_encoder;
                 }
             }
         }
@@ -726,9 +908,7 @@ void HAL_FDCAN_RxFifo1Callback(
         return;
     }
 
-    /*
-     * FIFO1に新しいメッセージが入った場合だけ処理する
-     */
+    //FIFO1に新しいメッセージが入った場合だけ処理する
     if ((RxFifo1ITs &
          FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == 0U)
     {
@@ -737,9 +917,7 @@ void HAL_FDCAN_RxFifo1Callback(
 
     uint8_t RxData[8] = {0};
 
-    /*
-     * FIFO1から受信データを取り出す
-     */
+    //FIFO1から受信データを取り出す
     if (HAL_FDCAN_GetRxMessage(
             &hfdcan1,
             FDCAN_RX_FIFO1,
@@ -750,10 +928,7 @@ void HAL_FDCAN_RxFifo1Callback(
         Error_Handler();
     }
 
-    /*
-     * 操作側マイコンからのIDが0x205の場合だけ
-     * ボタン状態を保存する
-     */
+    //操作マイコンからのIDが0x205の場合だけボタン状態を保存
     if (RxHeader_com.Identifier == 0x205)
     {
         motor0_up = RxData[2];
@@ -762,7 +937,8 @@ void HAL_FDCAN_RxFifo1Callback(
         motor1_up = RxData[4];
         motor1_down = RxData[5];
         
-        motor2_command = RxData[1];
+        motor2_command = RxData[1]; //□
+        motor3_command = RxData[0]; //〇
     }
 }
 /* USER CODE END 0 */
@@ -799,7 +975,12 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   MX_FDCAN1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+printf("\r\n");
+printf("============================\r\n");
+printf("STM32 control board started\r\n");
+printf("============================\r\n");
 
  int16_t _v=0;
   //モーター0
@@ -852,13 +1033,36 @@ motors[2].position_Kd = 0.0f;
 /* フォトインタラプタ検出済みフラグ */
 motors[2].homed = 0;
 
-    FDCAN_FilterTypeDef  FDCAN_Filter_settings;
-  FDCAN_Filter_settings.IdType=FDCAN_STANDARD_ID;
-  FDCAN_Filter_settings.FilterIndex=0;
-  FDCAN_Filter_settings.FilterType=FDCAN_FILTER_RANGE;
-  FDCAN_Filter_settings.FilterConfig=FDCAN_FILTER_TO_RXFIFO0;
-  FDCAN_Filter_settings.FilterID1=0x200;
-  FDCAN_Filter_settings.FilterID2=0x410;
+/* モーター3の初期化 */
+
+motors[3].Kp = 0.0f;
+motors[3].Ki = 0.0f;
+motors[3].Kd = 0.0f;
+motors[3].gosagoukei = 0.0f;
+motors[3].maenogosa = 0.0f;
+motors[3].v = 0;
+motors[3].can_id = 0x204;
+
+/*
+ * モーター3は速度PIDの目標値を使わず、
+ * 電流指令を直接送る。
+ */
+motors[3].mokuhyou = 0;
+
+/* 起動後は開側リミットまで開く */
+motor3_state = MOTOR3_STATE_OPENING;
+
+motor3_command = 0;
+motor3_command_previous = 0;
+
+/*
+ * 起動時のフォトインタラプタ状態を保存する
+ */
+motor2_photo_previous =
+    HAL_GPIO_ReadPin(
+        motor2_photointerrupter_GPIO_Port,
+        motor2_photointerrupter_Pin);
+        
   TxHeader.IdType=FDCAN_STANDARD_ID;
   TxHeader.TxFrameType=FDCAN_DATA_FRAME;
   TxHeader.DataLength=FDCAN_DLC_BYTES_8;
@@ -868,13 +1072,23 @@ motors[2].homed = 0;
   TxHeader.TxEventFifoControl=FDCAN_NO_TX_EVENTS;
   TxHeader.MessageMarker=0;
   
-  HAL_TIM_Base_Start_IT(&htim6);
-  if (HAL_OK != motor_CAN_RxTxSettings_init(&TxHeader)) Error_Handler();
-
-  if (HAL_OK != communication_CAN_init())
-  {
+//先にFDCAN3
+if (HAL_OK != motor_CAN_RxTxSettings_init(&TxHeader))
+{
     Error_Handler();
-  }
+}
+
+//次にFDCAN1
+if (HAL_OK != communication_CAN_init())
+{
+    Error_Handler();
+}
+
+//CANの準備が完了してから1msタイマー割り込みを開始する
+if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+{
+    Error_Handler();
+}
 
   /* USER CODE END 2 */
 
@@ -1057,6 +1271,54 @@ static void MX_TIM6_Init(void)
   /* USER CODE BEGIN TIM6_Init 2 */
 
   /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
 
 }
 
