@@ -332,7 +332,7 @@ if ((motor2_photo_previous == GPIO_PIN_SET) &&
     
   // 座標系をずらして現在位置を0にする。
   // 目標位置も同じ量だけずらすことで、フォトインタラプタ検出前後で
-  // 残りの移動量が変わらないようにする。homedってなんだ
+  // 残りの移動量が変わらないようにする。
     
 /*
  * 仕切りを検出した位置を原点にする
@@ -355,7 +355,7 @@ motors[2].previous_position_error = 0.0f;
  */
 motors[2].homed = 1U;
 }
-
+printf("motor2_photo_now: %d\r\n", motor2_photo_now);
 // 次回の判定用に現在状態を保存する
 motor2_photo_previous = motor2_photo_now;
 
@@ -951,7 +951,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+setbuf(stdout, NULL);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -1382,6 +1382,7 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
