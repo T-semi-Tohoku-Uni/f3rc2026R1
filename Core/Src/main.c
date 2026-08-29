@@ -52,6 +52,7 @@ typedef struct {
     volatile uint8_t encoder_initialized;
     volatile uint8_t homed;
 } Motor;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -82,9 +83,9 @@ typedef struct {
 //モーター3の電流値。回転方向が逆だったら正負を反対に！！
 
 /* ブロックを挟む方向 */
-#define MOTOR3_HOLD_CURRENT    1000
+#define MOTOR3_HOLD_CURRENT    600
 /* 板を開く方向 */
-#define MOTOR3_OPEN_CURRENT   (-1000)
+#define MOTOR3_OPEN_CURRENT   (-600)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -106,7 +107,6 @@ Motor motors[4];
 int16_t g_shusoku[4] = {0,0,0,0};
 FDCAN_TxHeaderTypeDef TxHeader;
 FDCAN_RxHeaderTypeDef RxHeader;
-
 FDCAN_TxHeaderTypeDef TxHeader_com;
 FDCAN_RxHeaderTypeDef RxHeader_com;
 
@@ -118,6 +118,7 @@ FDCAN_RxHeaderTypeDef RxHeader_com;
  * RxData[4]：モーター1 上昇
  * RxData[5]：モーター1 下降
  */
+ 
 volatile uint8_t motor0_up = 0;
 volatile uint8_t motor0_down = 0;
 volatile uint8_t motor1_up = 0;
@@ -147,6 +148,7 @@ volatile uint8_t motor3_command_previous = 0;
  */
 volatile uint8_t motor3_state =
     MOTOR3_STATE_OPENING;
+
 
 /* USER CODE END PV */
 
@@ -355,8 +357,7 @@ motors[2].previous_position_error = 0.0f;
  */
 motors[2].homed = 1U;
 }
-printf("motor2_photo_now: %d\r\n", motor2_photo_now);
-// 次回の判定用に現在状態を保存する
+
 motor2_photo_previous = motor2_photo_now;
 
 /* =========================================================
@@ -366,8 +367,9 @@ motor2_photo_previous = motor2_photo_now;
 //ボタンが0から1へ変わった瞬間を検出する
 if ((motor2_command != 0U) &&
     (motor2_command_previous == 0U) &&
-    (motors[2].encoder_initialized != 0U) &&
-    (motors[2].homed != 0U))
+    (motors[2].encoder_initialized != 0U) //&&
+    //(motors[2].homed != 0U)) 
+    )
   {
   //現在位置から72度先を目標位置にする
   
@@ -431,14 +433,14 @@ if (motor0_up && motor0_down)
  */
 else if (motor0_down && !motor0_lower_limit)
 {
-    motors[0].mokuhyou = 4000;
+    motors[0].mokuhyou = 2000;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor0_up && !motor0_upper_limit)
 {
-    motors[0].mokuhyou = -4000;
+    motors[0].mokuhyou = -2000;
 }
 /*
  * ボタンを押していない場合、
@@ -468,14 +470,14 @@ if (motor1_up && motor1_down)
  */
 else if (motor1_down && !motor1_lower_limit)
 {
-    motors[1].mokuhyou = 4000;
+    motors[1].mokuhyou = 2000;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor1_up && !motor1_upper_limit)
 {
-    motors[1].mokuhyou = -4000;
+    motors[1].mokuhyou = -2000;
 }
 /*
  * ボタンを押していない場合、
@@ -621,7 +623,7 @@ TxData[5] =
 uint8_t motor3_upper_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor3_upper_Pin) == GPIO_PIN_RESET);
+        motor3_upper_Pin) == GPIO_PIN_SET);
 
 uint8_t motor3_lower_limit =
     (HAL_GPIO_ReadPin(
@@ -939,6 +941,8 @@ void HAL_FDCAN_RxFifo1Callback(
         
         motor2_command = RxData[1]; //□
         motor3_command = RxData[0]; //〇
+
+        printf("%d %d %d %d %d %d \r\n", RxData[1], RxData[0],RxData[2],RxData[3],RxData[4],RxData[5]);
     }
 }
 /* USER CODE END 0 */
@@ -951,7 +955,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-setbuf(stdout, NULL);
+  setbuf(stdout, NULL);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -1026,9 +1030,9 @@ motors[2].target_position_count = 0;
 motors[2].position_integral = 0.0f;
 motors[2].previous_position_error = 0.0f;
 
-motors[2].position_Kp = 0.05f;
-motors[2].position_Ki = 0.0f;
-motors[2].position_Kd = 0.0f;
+motors[2].position_Kp = 0.03f;
+motors[2].position_Ki = 0.00f;
+motors[2].position_Kd = 0.0038f;
 
 /* フォトインタラプタ検出済みフラグ */
 motors[2].homed = 0;
@@ -1096,10 +1100,14 @@ if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-   
+        printf("raw upper=%d lower=%d\r\n",
+       HAL_GPIO_ReadPin(GPIOC, motor3_upper_Pin),
+       HAL_GPIO_ReadPin(GPIOC, motor3_lower_Pin));
+    
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
   }
   /* USER CODE END 3 */
 }
