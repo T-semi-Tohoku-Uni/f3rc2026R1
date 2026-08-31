@@ -131,7 +131,7 @@ volatile uint8_t motor2_command = 0;
 volatile uint8_t motor2_command_previous = 0;
 
 /* フォトインタラプタの前回状態 */
-volatile GPIO_PinState motor2_photo_previous = GPIO_PIN_SET;
+volatile GPIO_PinState motor2_photo_previous = GPIO_PIN_RESET;
 
 /*
  * モーター3開閉ボタン、0x205のRxData[0]から受信
@@ -392,6 +392,9 @@ motor2_command_previous = motor2_command;
  
 /* ---------- モーター0のリミット状態 ---------- */
 
+printf("motor1_up:%d\n", motor1_up);
+printf("motor1_down:%d\n", motor1_down);
+
 uint8_t motor0_upper_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
@@ -408,7 +411,7 @@ uint8_t motor0_lower_limit =
 uint8_t motor1_upper_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor1_upper_Pin) == GPIO_PIN_RESET);
+        motor1_upper_Pin) == GPIO_PIN_SET);
 
 uint8_t motor1_lower_limit =
     (HAL_GPIO_ReadPin(
@@ -462,7 +465,7 @@ else
  */
 if (motor1_up && motor1_down)
 {
-    motors[1].mokuhyou = 0;
+    motors[1].mokuhyou = -10;
     motors[1].gosagoukei = 0.0f;
 }
 /*
@@ -470,14 +473,14 @@ if (motor1_up && motor1_down)
  */
 else if (motor1_down && !motor1_lower_limit)
 {
-    motors[1].mokuhyou = 2000;
+    motors[1].mokuhyou = 50;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor1_up && !motor1_upper_limit)
 {
-    motors[1].mokuhyou = -2000;
+    motors[1].mokuhyou = -100;
 }
 /*
  * ボタンを押していない場合、
@@ -485,7 +488,7 @@ else if (motor1_up && !motor1_upper_limit)
  */
 else
 {
-    motors[1].mokuhyou = 0;
+    motors[1].mokuhyou = -10;
     motors[1].gosagoukei = 0.0f;
 }
 
@@ -933,11 +936,11 @@ void HAL_FDCAN_RxFifo1Callback(
     //操作マイコンからのIDが0x205の場合だけボタン状態を保存
     if (RxHeader_com.Identifier == 0x205)
     {
-        motor0_up = RxData[2];
-        motor0_down = RxData[3];
+        motor0_up = RxData[2]; //R1
+        motor0_down = RxData[3]; //R2
 
-        motor1_up = RxData[4];
-        motor1_down = RxData[5];
+        motor1_up = RxData[4]; //L1
+        motor1_down = RxData[5]; //L2
         
         motor2_command = RxData[1]; //□
         motor3_command = RxData[0]; //〇
@@ -955,6 +958,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+
   setbuf(stdout, NULL);
   /* USER CODE END 1 */
 
@@ -999,8 +1003,8 @@ printf("============================\r\n");
   
   //モーター1
   motors[1].Kp = 10;
-  motors[1].Ki = 0;
-  motors[1].Kd = 0;
+  motors[1].Ki = 0.5;
+  motors[1].Kd = 0.1;
   motors[1].gosagoukei = 0;
   motors[1].maenogosa = 0;
   motors[1].v = 0;
