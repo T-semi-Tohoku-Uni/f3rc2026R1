@@ -318,7 +318,7 @@ if(htim == &htim6)
 {
 /*
  * モーター2のフォトインタラプタ処理(合ってるかわからん)
- * GPIO_PULLUPを使用しているため、検出時GPIO_PIN_RESETを想定
+ * 検出時GPIO_PIN_SETを想定
   */
 GPIO_PinState motor2_photo_now =
     HAL_GPIO_ReadPin(
@@ -326,10 +326,10 @@ GPIO_PinState motor2_photo_now =
         motor2_photointerrupter_Pin);
 
 /*
- * SETからRESETへ変わった瞬間だけ処理する
+ * RESETからSETへ変わった瞬間だけ処理する
  */
-if ((motor2_photo_previous == GPIO_PIN_SET) &&
-    (motor2_photo_now == GPIO_PIN_RESET))
+if ((motor2_photo_previous == GPIO_PIN_RESET) &&
+    (motor2_photo_now == GPIO_PIN_SET))
 {
     
   // 座標系をずらして現在位置を0にする。
@@ -387,20 +387,19 @@ if ((motor2_command != 0U) &&
 motor2_command_previous = motor2_command;
 
 // モーター0、1の目標速度決定
-// GPIO_PULLUPを使用しているため、
-// リミットスイッチ押下時はGPIO_PIN_RESETとして判定する
+// リミットスイッチ押下時はGPIO_PIN_SETとして判定する
  
 /* ---------- モーター0のリミット状態 ---------- */
 
 uint8_t motor0_upper_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor0_upper_Pin) == GPIO_PIN_RESET);
+        motor0_upper_Pin) == GPIO_PIN_SET);
 
 uint8_t motor0_lower_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor0_lower_Pin) == GPIO_PIN_RESET);
+        motor0_lower_Pin) == GPIO_PIN_SET);
 
 
 /* ---------- モーター1のリミット状態 ---------- */
@@ -408,12 +407,12 @@ uint8_t motor0_lower_limit =
 uint8_t motor1_upper_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor1_upper_Pin) == GPIO_PIN_RESET);
+        motor1_upper_Pin) == GPIO_PIN_SET);
 
 uint8_t motor1_lower_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor1_lower_Pin) == GPIO_PIN_RESET);
+        motor1_lower_Pin) == GPIO_PIN_SET);
 
 
 /* =========================================================
@@ -628,7 +627,7 @@ uint8_t motor3_upper_limit =
 uint8_t motor3_lower_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor3_lower_Pin) == GPIO_PIN_RESET);
+        motor3_lower_Pin) == GPIO_PIN_SET);
 
 
 /* ---------------------------------------------------------
@@ -833,7 +832,7 @@ void HAL_FDCAN_RxFifo0Callback(
                 if (HAL_GPIO_ReadPin(
                      motor2_photointerrupter_GPIO_Port,
                      motor2_photointerrupter_Pin)
-                    == GPIO_PIN_RESET)
+                    == GPIO_PIN_SET)
                   {
                   /*
                    * すでに仕切り位置にいるため、動かさない
