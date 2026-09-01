@@ -83,9 +83,9 @@ typedef struct {
 //モーター3の電流値。回転方向が逆だったら正負を反対に！！
 
 /* ブロックを挟む方向 */
-#define MOTOR3_HOLD_CURRENT    600
+#define MOTOR3_HOLD_CURRENT    100
 /* 板を開く方向 */
-#define MOTOR3_OPEN_CURRENT   (-600)
+#define MOTOR3_OPEN_CURRENT   (-100)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -129,9 +129,14 @@ volatile uint8_t motor1_down = 0;
  */
 volatile uint8_t motor2_command = 0;
 volatile uint8_t motor2_command_previous = 0;
+/*
+ * モーター2の72度移動要求。
+ *
+ * ボタンを押した時点でエンコーダ初期化前でも、
+ * 指令を捨てずに保存する。
+ */
+volatile uint8_t motor2_move_request = 0;
 
-/* フォトインタラプタの前回状態 */
-volatile GPIO_PinState motor2_photo_previous = GPIO_PIN_RESET;
 
 /*
  * モーター3開閉ボタン、0x205のRxData[0]から受信
@@ -316,75 +321,61 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 if(htim == &htim6)
 {
-/*
- * モーター2のフォトインタラプタ処理(合ってるかわからん)
- * GPIO_PULLUPを使用しているため、検出時GPIO_PIN_RESETを想定
-  */
-GPIO_PinState motor2_photo_now =
-    HAL_GPIO_ReadPin(
-        motor2_photointerrupter_GPIO_Port,
-        motor2_photointerrupter_Pin);
-
-/*
- * SETからRESETへ変わった瞬間だけ処理する
- */
-if ((motor2_photo_previous == GPIO_PIN_SET) &&
-    (motor2_photo_now == GPIO_PIN_RESET))
-{
-    
-  // 座標系をずらして現在位置を0にする。
-  // 目標位置も同じ量だけずらすことで、フォトインタラプタ検出前後で
-  // 残りの移動量が変わらないようにする。
-    
-/*
- * 仕切りを検出した位置を原点にする
- */
-motors[2].position_count = 0;
-
-/*
- * 目標位置も0にすることで、その場で停止させる
- */
-motors[2].target_position_count = 0;
-
-/*
- * PIDの内部値をリセットする
- */
-motors[2].position_integral = 0.0f;
-motors[2].previous_position_error = 0.0f;
-
-/*
- * 一度以上、仕切りを検出した
- */
-motors[2].homed = 1U;
-}
-
-motor2_photo_previous = motor2_photo_now;
 
 /* =========================================================
  * モーター2の72度回転指令
  * ========================================================= */
 
 //ボタンが0から1へ変わった瞬間を検出する
+/* =========================================================
+ * モーター2
+ * □ボタンを1回押すごとに機構を72度回転させる
+ * ========================================================= */
+
+/*
+ * □ボタンが0から1へ変化した瞬間を検出する。
+ */
 if ((motor2_command != 0U) &&
-    (motor2_command_previous == 0U) &&
-    (motors[2].encoder_initialized != 0U) //&&
-    //(motors[2].homed != 0U)) 
-    )
-  {
-  //現在位置から72度先を目標位置にする
-  
+    (motor2_command_previous == 0U))
+{
+    /*
+     * 72度移動要求を保存する。
+     */
+    motor2_move_request = 1U;
+}
+
+/*
+ * 次回のボタン立ち上がり判定に使う。
+ */
+motor2_command_previous =
+    motor2_command;
+
+/*
+ * エンコーダ初期化後に移動要求を実行する。
+ */
+if ((motor2_move_request != 0U) &&
+    (motors[2].encoder_initialized != 0U))
+{
+    /*
+     * ボタンを押した時点の現在位置から、
+     * 機構72度分先を目標位置にする。
+     */
     motors[2].target_position_count =
         motors[2].position_count +
         MOTOR2_MOVE_COUNT;
 
     /*
-     * 新しい動作を開始するのでPIDをリセット
+     * 新しい動作を開始するため、
+     * 位置PIDの内部値をリセットする。
      */
     motors[2].position_integral = 0.0f;
     motors[2].previous_position_error = 0.0f;
+
+    /*
+     * 保存していた移動要求を消費する。
+     */
+    motor2_move_request = 0U;
 }
-// 次回の判定用に現在のボタン状態を保存
-motor2_command_previous = motor2_command;
 
 // モーター0、1の目標速度決定
 // GPIO_PULLUPを使用しているため、
@@ -392,18 +383,15 @@ motor2_command_previous = motor2_command;
  
 /* ---------- モーター0のリミット状態 ---------- */
 
-printf("motor1_up:%d\n", motor1_up);
-printf("motor1_down:%d\n", motor1_down);
-
 uint8_t motor0_upper_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor0_upper_Pin) == GPIO_PIN_RESET);
+        motor0_upper_Pin) == GPIO_PIN_SET);
 
 uint8_t motor0_lower_limit =
     (HAL_GPIO_ReadPin(
         GPIOC,
-        motor0_lower_Pin) == GPIO_PIN_RESET);
+        motor0_lower_Pin) == GPIO_PIN_SET);
 
 
 /* ---------- モーター1のリミット状態 ---------- */
@@ -436,14 +424,14 @@ if (motor0_up && motor0_down)
  */
 else if (motor0_down && !motor0_lower_limit)
 {
-    motors[0].mokuhyou = 2000;
+    motors[0].mokuhyou = 500;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor0_up && !motor0_upper_limit)
 {
-    motors[0].mokuhyou = -2000;
+    motors[0].mokuhyou = -1000;
 }
 /*
  * ボタンを押していない場合、
@@ -465,7 +453,7 @@ else
  */
 if (motor1_up && motor1_down)
 {
-    motors[1].mokuhyou = -10;
+    motors[1].mokuhyou = 0;
     motors[1].gosagoukei = 0.0f;
 }
 /*
@@ -473,14 +461,14 @@ if (motor1_up && motor1_down)
  */
 else if (motor1_down && !motor1_lower_limit)
 {
-    motors[1].mokuhyou = 50;
+    motors[1].mokuhyou = 500;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor1_up && !motor1_upper_limit)
 {
-    motors[1].mokuhyou = -100;
+    motors[1].mokuhyou = -1000;
 }
 /*
  * ボタンを押していない場合、
@@ -488,7 +476,7 @@ else if (motor1_up && !motor1_upper_limit)
  */
 else
 {
-    motors[1].mokuhyou = -10;
+    motors[1].mokuhyou = 0;
     motors[1].gosagoukei = 0.0f;
 }
 
@@ -830,30 +818,6 @@ void HAL_FDCAN_RxFifo0Callback(
                 */
                 motors[2].position_count = 0;
 
-                /*
-                 * 起動時点ですでに仕切りを検出しているか確認する
-                 */
-                if (HAL_GPIO_ReadPin(
-                     motor2_photointerrupter_GPIO_Port,
-                     motor2_photointerrupter_Pin)
-                    == GPIO_PIN_RESET)
-                  {
-                  /*
-                   * すでに仕切り位置にいるため、動かさない
-                   */
-                    motors[2].target_position_count = 0;
-                    motors[2].homed = 1U;
-                  }
-                else
-                  {
-                    /*
-                     * 検出できなければ最大72度分自動回転を開始
-                     */
-                    motors[2].target_position_count =
-                    MOTOR2_MOVE_COUNT;
-
-                    motors[2].homed = 0U;
-                  }
 
                 motors[2].encoder_initialized = 1U;
                 }
@@ -944,12 +908,10 @@ void HAL_FDCAN_RxFifo1Callback(
         
         motor2_command = RxData[1]; //□
         motor3_command = RxData[0]; //〇
-
-        printf("%d %d %d %d %d %d \r\n", RxData[1], RxData[0],RxData[2],RxData[3],RxData[4],RxData[5]);
     }
+
 }
 /* USER CODE END 0 */
-
 /**
   * @brief  The application entry point.
   * @retval int
@@ -985,10 +947,6 @@ int main(void)
   MX_FDCAN1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-printf("\r\n");
-printf("============================\r\n");
-printf("STM32 control board started\r\n");
-printf("============================\r\n");
 
  int16_t _v=0;
   //モーター0
@@ -1003,8 +961,8 @@ printf("============================\r\n");
   
   //モーター1
   motors[1].Kp = 10;
-  motors[1].Ki = 0.5;
-  motors[1].Kd = 0.1;
+  motors[1].Ki = 0.0;
+  motors[1].Kd = 0.0;
   motors[1].gosagoukei = 0;
   motors[1].maenogosa = 0;
   motors[1].v = 0;
@@ -1041,6 +999,7 @@ motors[2].position_Kd = 0.0038f;
 /* フォトインタラプタ検出済みフラグ */
 motors[2].homed = 0;
 
+motor2_move_request = 0;
 /* モーター3の初期化 */
 
 motors[3].Kp = 0.0f;
@@ -1063,14 +1022,7 @@ motor3_state = MOTOR3_STATE_OPENING;
 motor3_command = 0;
 motor3_command_previous = 0;
 
-/*
- * 起動時のフォトインタラプタ状態を保存する
- */
-motor2_photo_previous =
-    HAL_GPIO_ReadPin(
-        motor2_photointerrupter_GPIO_Port,
-        motor2_photointerrupter_Pin);
-        
+
   TxHeader.IdType=FDCAN_STANDARD_ID;
   TxHeader.TxFrameType=FDCAN_DATA_FRAME;
   TxHeader.DataLength=FDCAN_DLC_BYTES_8;
@@ -1104,9 +1056,6 @@ if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-        printf("raw upper=%d lower=%d\r\n",
-       HAL_GPIO_ReadPin(GPIOC, motor3_upper_Pin),
-       HAL_GPIO_ReadPin(GPIOC, motor3_lower_Pin));
     
     /* USER CODE END WHILE */
 
