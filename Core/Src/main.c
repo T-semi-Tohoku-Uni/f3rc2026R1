@@ -76,22 +76,22 @@ typedef struct {
 #define MOTOR3_STATE_STOPPED  4U
 
 /* 開くときの目標速度 */
-#define MOTOR3_OPEN_TARGET_RPM       (-2000)
+#define MOTOR3_OPEN_TARGET_RPM       (-3000)
 
 /* 閉じるときの目標速度 */
-#define MOTOR3_CLOSE_TARGET_RPM       2000
+#define MOTOR3_CLOSE_TARGET_RPM       3000
 
 /* 開くときの速度Pゲイン */
-#define MOTOR3_OPEN_SPEED_KP          20.0f
+#define MOTOR3_OPEN_SPEED_KP          30.0f
 
 /* 閉じるときの速度Pゲイン */
-#define MOTOR3_CLOSE_SPEED_KP         20.0f
+#define MOTOR3_CLOSE_SPEED_KP         30.0f
 
 /* 開方向の最大電流 */
-#define MOTOR3_OPEN_MAX_CURRENT       2000
+#define MOTOR3_OPEN_MAX_CURRENT       3000
 
 /* 閉方向の最大電流 */
-#define MOTOR3_CLOSE_MAX_CURRENT      2000
+#define MOTOR3_CLOSE_MAX_CURRENT      3000
 
 /* 接触後に流す保持電流 */
 #define MOTOR3_HOLD_CURRENT           200
@@ -460,14 +460,14 @@ if (motor0_up && motor0_down)
  */
 else if (motor0_down && !motor0_lower_limit)
 {
-    motors[0].mokuhyou = 2000;
+    motors[0].mokuhyou = 3000;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor0_up && !motor0_upper_limit)
 {
-    motors[0].mokuhyou = -2000;
+    motors[0].mokuhyou = -3000;
 }
 /*
  * ボタンを押していない場合、
@@ -497,14 +497,14 @@ if (motor1_up && motor1_down)
  */
 else if (motor1_down && !motor1_lower_limit)
 {
-    motors[1].mokuhyou = 2000;
+    motors[1].mokuhyou = 3000;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor1_up && !motor1_upper_limit)
 {
-    motors[1].mokuhyou = -2000;
+    motors[1].mokuhyou = -3000;
 }
 /*
  * ボタンを押していない場合、
