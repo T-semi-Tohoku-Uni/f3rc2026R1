@@ -60,7 +60,7 @@ typedef struct {
 #define M2006_ENCODER_CPR          8192L
 
 /* 72 × 36 = 2592度 = 7.2回転 */
-#define MOTOR2_MOVE_DEGREE         (72.0f * 36.0f)
+#define MOTOR2_MOVE_DEGREE         (72.0f * 36.2f)
 
 #define MOTOR2_MOVE_COUNT \
     ((int32_t)(M2006_ENCODER_CPR * MOTOR2_MOVE_DEGREE / 360.0f))
@@ -69,23 +69,48 @@ typedef struct {
 #define MOTOR2_MAX_CURRENT         1000
 
 /* モーター3の動作状態 */
-
-/* 開く方向へ移動中 */
 #define MOTOR3_STATE_OPENING  0U
-
-/* 開側リミットで停止中 */
 #define MOTOR3_STATE_OPENED   1U
+#define MOTOR3_STATE_CLOSING  2U
+#define MOTOR3_STATE_HOLDING  3U
+#define MOTOR3_STATE_STOPPED  4U
 
-/* 閉じる方向へ電流を流して保持中 */
-#define MOTOR3_STATE_HOLDING  2U
+/* 開くときの目標速度 */
+#define MOTOR3_OPEN_TARGET_RPM       (-1500)
 
+/* 閉じるときの目標速度 */
+#define MOTOR3_CLOSE_TARGET_RPM       1500
 
-//モーター3の電流値。回転方向が逆だったら正負を反対に！！
+/* 開くときの速度Pゲイン */
+#define MOTOR3_OPEN_SPEED_KP          15.0f
 
-/* ブロックを挟む方向 */
-#define MOTOR3_HOLD_CURRENT    100
-/* 板を開く方向 */
-#define MOTOR3_OPEN_CURRENT   (-100)
+/* 閉じるときの速度Pゲイン */
+#define MOTOR3_CLOSE_SPEED_KP         15.0f
+
+/* 開方向の最大電流 */
+#define MOTOR3_OPEN_MAX_CURRENT       1500
+
+/* 閉方向の最大電流 */
+#define MOTOR3_CLOSE_MAX_CURRENT      1500
+
+/* 接触後に流す保持電流 */
+#define MOTOR3_HOLD_CURRENT           200
+
+/* これ以下の速度を停止付近とみなす */
+#define MOTOR3_CONTACT_RPM_THRESHOLD  30
+
+/* これ以上の電流を負荷上昇とみなす */
+#define MOTOR3_CONTACT_CURRENT        500
+
+/* 閉じ始め直後は接触判定しない */
+#define MOTOR3_CONTACT_IGNORE_MS      200U
+
+/* 接触条件が連続して必要な時間 */
+#define MOTOR3_CONTACT_CONFIRM_MS     100U
+
+/* 閉じ動作の最大時間 */
+#define MOTOR3_CLOSE_TIMEOUT_MS       2000U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -154,6 +179,17 @@ volatile uint8_t motor3_command_previous = 0;
 volatile uint8_t motor3_state =
     MOTOR3_STATE_OPENING;
 
+/* モーター3の電流フィードバック */
+volatile int16_t motor3_feedback_current = 0;
+
+/* 接触条件が継続した時間 */
+volatile uint16_t motor3_contact_count = 0;
+
+/* 閉じ始めてからの経過時間 */
+volatile uint16_t motor3_close_time = 0;
+
+/* デバッグ用の電流指令 */
+volatile int16_t debug_motor3_current_cmd = 0;
 
 /* USER CODE END PV */
 
@@ -424,14 +460,14 @@ if (motor0_up && motor0_down)
  */
 else if (motor0_down && !motor0_lower_limit)
 {
-    motors[0].mokuhyou = 500;
+    motors[0].mokuhyou = 2500;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor0_up && !motor0_upper_limit)
 {
-    motors[0].mokuhyou = -1000;
+    motors[0].mokuhyou = -2500;
 }
 /*
  * ボタンを押していない場合、
@@ -461,14 +497,14 @@ if (motor1_up && motor1_down)
  */
 else if (motor1_down && !motor1_lower_limit)
 {
-    motors[1].mokuhyou = 500;
+    motors[1].mokuhyou = 2500;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor1_up && !motor1_upper_limit)
 {
-    motors[1].mokuhyou = -1000;
+    motors[1].mokuhyou = -2500;
 }
 /*
  * ボタンを押していない場合、
@@ -583,10 +619,10 @@ if (motors[2].encoder_initialized != 0U)
             -(float)MOTOR2_MAX_CURRENT;
     }
 
-  //目標位置から±50以内なら停止、積分値もリセット
+  //目標位置から±25以内なら停止、積分値もリセット
 
-    if ((motor2_position_error < 50.0f) &&
-        (motor2_position_error > -50.0f))
+    if ((motor2_position_error < 25.0f) &&
+        (motor2_position_error > -25.0f))
     {
       motor2_output = 0.0f;
       motors[2].position_integral = 0.0f;
@@ -629,23 +665,30 @@ if ((motor3_command != 0U) &&
     (motor3_command_previous == 0U))
 {
     /*
-     * 開き切って停止してたら閉じて保持する。
+     * 開いて停止中なら、閉じ始める。
      */
     if (motor3_state == MOTOR3_STATE_OPENED)
     {
         motor3_state =
-            MOTOR3_STATE_HOLDING;
+            MOTOR3_STATE_CLOSING;
+
+        motor3_contact_count = 0U;
+        motor3_close_time = 0U;
     }
     /*
-     * 閉じてたら開く。
+     * 閉じている途中、保持中、停止中なら開く。
      */
-    else if (motor3_state == MOTOR3_STATE_HOLDING)
+    else if ((motor3_state == MOTOR3_STATE_CLOSING) ||
+             (motor3_state == MOTOR3_STATE_HOLDING) ||
+             (motor3_state == MOTOR3_STATE_STOPPED))
     {
         motor3_state =
             MOTOR3_STATE_OPENING;
+
+        motor3_contact_count = 0U;
+        motor3_close_time = 0U;
     }
 }
-
 
 /*
  * 次回のタイマー割り込みで使うため、今回のボタン状態を保存。
@@ -658,77 +701,220 @@ motor3_command_previous = motor3_command;
  * --------------------------------------------------------- */
 int16_t motor3_current_cmd = 0;
 
+/* 回転速度の絶対値 */
+int32_t motor3_abs_rpm =
+    (int32_t)motors[3].v;
 
-/*
- * 開く方向へ移動中
- */
+if (motor3_abs_rpm < 0)
+{
+    motor3_abs_rpm =
+        -motor3_abs_rpm;
+}
+
+/* フィードバック電流の絶対値 */
+int32_t motor3_abs_current =
+    (int32_t)motor3_feedback_current;
+
+if (motor3_abs_current < 0)
+{
+    motor3_abs_current =
+        -motor3_abs_current;
+}
+
+/* =========================================================
+ * 開く
+ * ========================================================= */
 if (motor3_state == MOTOR3_STATE_OPENING)
 {
-    /*
-     * 開側リミットに到達した場合。
-     */
+    motor3_contact_count = 0U;
+    motor3_close_time = 0U;
+
     if (motor3_upper_limit != 0U)
     {
-        /*
-         * モーターを停止する。
-         */
         motor3_current_cmd = 0;
 
-        /*
-         * 開き切った状態へ変更する。
-         */
         motor3_state =
             MOTOR3_STATE_OPENED;
     }
     else
     {
-        /*
-         * まだ開側リミットへ到達していないため、
-         * 開く方向へ一定電流を流す。
-         */
+        float motor3_speed_error =
+            (float)MOTOR3_OPEN_TARGET_RPM -
+            (float)motors[3].v;
+
+        float motor3_output =
+            MOTOR3_OPEN_SPEED_KP *
+            motor3_speed_error;
+
+        if (motor3_output >
+            (float)MOTOR3_OPEN_MAX_CURRENT)
+        {
+            motor3_output =
+                (float)MOTOR3_OPEN_MAX_CURRENT;
+        }
+
+        if (motor3_output <
+            -(float)MOTOR3_OPEN_MAX_CURRENT)
+        {
+            motor3_output =
+                -(float)MOTOR3_OPEN_MAX_CURRENT;
+        }
+
         motor3_current_cmd =
-            MOTOR3_OPEN_CURRENT;
+            (int16_t)motor3_output;
     }
 }
 
-
-/*
- * ブロックを挟んで保持する状態
- */
-else if (motor3_state == MOTOR3_STATE_HOLDING)
+/* =========================================================
+ * 開いて停止
+ * ========================================================= */
+else if (motor3_state == MOTOR3_STATE_OPENED)
 {
+    motor3_current_cmd = 0;
+
+    motor3_contact_count = 0U;
+    motor3_close_time = 0U;
+}
+
+/* =========================================================
+ * 閉じる
+ * ========================================================= */
+else if (motor3_state == MOTOR3_STATE_CLOSING)
+{
+    if (motor3_close_time < UINT16_MAX)
+    {
+        motor3_close_time++;
+    }
+
     /*
-     * 閉側リミットへ到達した場合。
-     *
-     * ブロックがないときに機構が閉じすぎることを
-     * 防止するため、電流を0にする。
+     * 閉側リミットへ到達した場合は停止する。
      */
     if (motor3_lower_limit != 0U)
     {
         motor3_current_cmd = 0;
+
+        motor3_state =
+            MOTOR3_STATE_STOPPED;
+
+        motor3_contact_count = 0U;
+    }
+    /*
+     * タイムアウトした場合も停止する。
+     */
+    else if (motor3_close_time >=
+             MOTOR3_CLOSE_TIMEOUT_MS)
+    {
+        motor3_current_cmd = 0;
+
+        motor3_state =
+            MOTOR3_STATE_STOPPED;
+
+        motor3_contact_count = 0U;
     }
     else
     {
         /*
-         * 閉じる方向へ一定電流を流す。
-         *
-         * ブロックを挟んでモーターの回転が止まっても、
-         * この電流を維持することで挟む力を保つ。
+         * 閉じる方向の速度P制御。
          */
+        float motor3_speed_error =
+            (float)MOTOR3_CLOSE_TARGET_RPM -
+            (float)motors[3].v;
+
+        float motor3_output =
+            MOTOR3_CLOSE_SPEED_KP *
+            motor3_speed_error;
+
+        if (motor3_output >
+            (float)MOTOR3_CLOSE_MAX_CURRENT)
+        {
+            motor3_output =
+                (float)MOTOR3_CLOSE_MAX_CURRENT;
+        }
+
+        if (motor3_output <
+            -(float)MOTOR3_CLOSE_MAX_CURRENT)
+        {
+            motor3_output =
+                -(float)MOTOR3_CLOSE_MAX_CURRENT;
+        }
+
+        motor3_current_cmd =
+            (int16_t)motor3_output;
+
+        /*
+         * 閉じ始め直後は、モーター速度がまだ0なので、
+         * 接触判定を行わない。
+         */
+        if (motor3_close_time <
+            MOTOR3_CONTACT_IGNORE_MS)
+        {
+            motor3_contact_count = 0U;
+        }
+        /*
+         * 十分時間が経過した後で、
+         * 低速かつ高電流なら接触候補とする。
+         */
+        else if ((motor3_abs_rpm <=
+                  MOTOR3_CONTACT_RPM_THRESHOLD) &&
+                 (motor3_abs_current >=
+                  MOTOR3_CONTACT_CURRENT))
+        {
+            if (motor3_contact_count <
+                MOTOR3_CONTACT_CONFIRM_MS)
+            {
+                motor3_contact_count++;
+            }
+        }
+        else
+        {
+            motor3_contact_count = 0U;
+        }
+
+        /*
+         * 接触条件が一定時間続いた場合のみ、
+         * 弱い一定電流保持へ移行する。
+         */
+        if (motor3_contact_count >=
+            MOTOR3_CONTACT_CONFIRM_MS)
+        {
+            motor3_state =
+                MOTOR3_STATE_HOLDING;
+
+            motor3_current_cmd =
+                MOTOR3_HOLD_CURRENT;
+        }
+    }
+}
+
+/* =========================================================
+ * ブロックを一定電流で保持する
+ * ========================================================= */
+else if (motor3_state == MOTOR3_STATE_HOLDING)
+{
+    /*
+     * 閉側リミットに入った場合は停止する。
+     */
+    if (motor3_lower_limit != 0U)
+    {
+        motor3_current_cmd = 0;
+
+        motor3_state =
+            MOTOR3_STATE_STOPPED;
+    }
+    else
+    {
         motor3_current_cmd =
             MOTOR3_HOLD_CURRENT;
     }
 }
 
-
-/*
- * 開側リミットで停止している場合
- */
+/* =========================================================
+ * 安全停止
+ * ========================================================= */
 else
 {
     motor3_current_cmd = 0;
 }
-
 
 /* ---------------------------------------------------------
  * モーター3の電流指令をCANデータへ入れる
@@ -804,7 +990,13 @@ void HAL_FDCAN_RxFifo0Callback(
             (int16_t)(
                 ((uint16_t)RxData[2] << 8) |
                 RxData[3]);
-
+        if (i == 3)
+        {
+          motor3_feedback_current =
+            (int16_t)(
+                ((uint16_t)RxData[4] << 8) |
+                RxData[5]);
+        }
         //モーター2だけ累積位置を計算する
         if (i == 2)
         {
@@ -1056,7 +1248,20 @@ if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    
+    printf(
+        "M3 state=%u cmd=%u "
+        "rpm=%d fbCurrent=%d "
+        "out=%d contact=%u time=%u\r\n",
+        (unsigned int)motor3_state,
+        (unsigned int)motor3_command,
+        (int)motors[3].v,
+        (int)motor3_feedback_current,
+        (int)debug_motor3_current_cmd,
+        (unsigned int)motor3_contact_count,
+        (unsigned int)motor3_close_time);
+
+    HAL_Delay(100);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
