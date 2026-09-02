@@ -460,14 +460,14 @@ if (motor0_up && motor0_down)
  */
 else if (motor0_down && !motor0_lower_limit)
 {
-    motors[0].mokuhyou = 2500;
+    motors[0].mokuhyou = 2000;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor0_up && !motor0_upper_limit)
 {
-    motors[0].mokuhyou = -2500;
+    motors[0].mokuhyou = -2000;
 }
 /*
  * ボタンを押していない場合、
@@ -497,14 +497,14 @@ if (motor1_up && motor1_down)
  */
 else if (motor1_down && !motor1_lower_limit)
 {
-    motors[1].mokuhyou = 2500;
+    motors[1].mokuhyou = 2000;
 }
 /*
  * 上ボタンが押され、上限に達していなければ上昇
  */
 else if (motor1_up && !motor1_upper_limit)
 {
-    motors[1].mokuhyou = -2500;
+    motors[1].mokuhyou = -2000;
 }
 /*
  * ボタンを押していない場合、
